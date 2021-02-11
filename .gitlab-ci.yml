@@ -1,0 +1,175 @@
+
+image: docker:19.03.1
+
+services:
+  - docker:19.03.1-dind
+  
+variables:
+  # Use TLS https://docs.gitlab.com/ee/ci/docker/using_docker_build.html#tls-enabled
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_DRIVER: overlay2
+
+
+
+
+
+stages:
+  - build
+  - deploy
+
+
+
+
+
+.utils_functions: &utils_functions | 
+  function git_describe() {
+    git --version &> /dev/null
+  
+    if [ $? != 0 ]
+    then
+      (apk update && apk add git) &> /dev/null || true
+      (apt update && apt install -y git) &> /dev/null || true
+    fi
+  
+    TAG_COMMIT=`git rev-list --abbrev-commit --tags --max-count=1`
+    TAG=`git describe --abbrev=0 --tags "$TAG_COMMIT" 2>/dev/null || true`
+    COMMIT=`git rev-parse --short HEAD`
+    DATE=`git log -1 --format=%cd --date=format:"%Y%m%d"`
+  
+    if [ "$TAG" == "" ]
+    then
+      if [ -z "$FROM_CONFIG_REPO" ]
+      then
+        echo "$COMMIT-$DATE"
+      else
+        echo "$COMMIT-$DATE-ci-$FROM_CONFIG_REPO"
+      fi
+      return 0
+    fi
+  
+    if [ "$COMMIT" != "$TAG_COMMIT" ]
+    then
+      if [ -z "$FROM_CONFIG_REPO" ]
+      then
+        echo "$TAG-next-$COMMIT-$DATE"
+      else
+        echo "$TAG-next-$COMMIT-$DATE-ci-$FROM_CONFIG_REPO"
+      fi
+      return 0
+    fi
+  
+    git status --porcelain &> /dev/null
+  
+    if [ $? == 0 ]
+    then
+      if [ -z "$FROM_CONFIG_REPO" ]
+      then
+        echo "$TAG"
+      else
+        echo "$TAG-ci-$FROM_CONFIG_REPO"
+      fi
+      echo "$TAG"
+    else
+      if [ -z "$FROM_CONFIG_REPO" ]
+      then
+        echo "$TAG-dirty"
+      else
+        echo "$TAG-dirty-ci-$FROM_CONFIG_REPO"
+      fi
+    fi
+  
+    return 0
+  }
+  
+  
+  
+  
+  function upgrade_deploy_dev() {
+  
+    echo "Generating deploy base file"
+        echo "ewogICJ0b2tlbiI6ICIke0RFUExPWV9ERVZfVE9LRU59IiwKICAiZGF0YV90b19jaGFuZ2UiOiB7ImltYWdlIjogeyJyZXBvc2l0b3J5IjogInJlZ2lzdHJ5LmdpdGxhYi5jb20vaWd1YW5haXQvb2Fyc29hbGRlYS9hZ2VudGVzLWZyb250ZW5kL2RldiIsICJ0YWciOiAiJHtWRVJTSU9OfSIsICJwdWxsUG9saWN5IjogIklmTm90UHJlc2VudCJ9LCAiaW1hZ2VQdWxsU2VjcmV0IjogImdpdGxhYiIsICJwb3J0cyI6IFt7Im5hbWUiOiAiaHR0cCIsICJjb250YWluZXJQb3J0IjogMzAwMCwgInByb3RvY29sIjogIlRDUCJ9XX0sCiAgImFwcF9uYW1lIjogImFnZW50ZXMtZnJvbnRlbmQiLAogICJhcHBfbmFtZXNwYWNlIjogIm9hcnNvYWxkZWEtYXBwcyIsCiAgInByb2plY3RfaWQiOiAiJHtERVBMT1lfUFJPSkVDVF9ERVZfSUR9Igp9" | base64 -d > deploy_multi.json.base
+  
+        echo "Replacing template variables on deploy file"
+        envsubst < deploy_multi.json.base > deploy_multi.json
+  
+        echo "Send request to rancher to update deploy"
+        curl -v --fail -X POST -H 'Accept: application/json' -H 'Content-Type: application/json' -d @deploy_multi.json ${DEPLOY_URL}
+  
+      }
+  
+  
+  function deploy_to_kubernetes() {
+    export VERSION=$(git_describe)
+    
+  }
+  
+  function deploy_to_kubernetes_dev() {
+    export VERSION=$(git_describe)
+    
+    upgrade_deploy_dev
+    
+  }
+  
+
+
+before_script:
+  - *utils_functions
+
+
+
+
+
+build_prod:
+  stage: build
+  script:
+    - echo "CkZST00gbm9kZToxMi4xNi4yLXN0cmV0Y2gKCldPUktESVIgL2FwcApDT1BZIHBhY2thZ2UuanNvbiB5YXJuLmxvY2sgLi8KUlVOIHlhcm4KQ09QWSAuLyAuCgoKUlVOIGlmIFsgLWYgLmVudi5wcm9kIF07IHRoZW4gY3AgLWYgLmVudi5wcm9kIC5lbnYubG9jYWw7IGZpCgoKUlVOIHlhcm4gYnVpbGQKQ01EIFsieWFybiIsICJzdGFydCJdCg==" | base64 -d > Dockerfile
+    - VERSION=$(git_describe)
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE:latest || true
+    - docker build --cache-from $CI_REGISTRY_IMAGE:latest --tag $CI_REGISTRY_IMAGE:latest --tag $CI_REGISTRY_IMAGE:$VERSION .
+    - docker push $CI_REGISTRY_IMAGE:$VERSION
+    - docker push $CI_REGISTRY_IMAGE:latest
+  only:
+    - master
+build_dev:
+  stage: build
+  script:
+    - echo "CkZST00gbm9kZToxMi4xNi4yLXN0cmV0Y2gKCldPUktESVIgL2FwcApDT1BZIHBhY2thZ2UuanNvbiB5YXJuLmxvY2sgLi8KUlVOIHlhcm4KQ09QWSAuLyAuCgoKUlVOIGlmIFsgLWYgLmVudi5kZXYgXTsgdGhlbiBjcCAtZiAuZW52LmRldiAuZW52LmxvY2FsOyBmaQoKClJVTiB5YXJuIGJ1aWxkCkNNRCBbInlhcm4iLCAic3RhcnQiXQo=" | base64 -d > Dockerfile
+    - VERSION=$(git_describe)
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE/dev:latest || true
+    - docker build --cache-from $CI_REGISTRY_IMAGE/dev:latest --tag $CI_REGISTRY_IMAGE/dev:latest --tag $CI_REGISTRY_IMAGE/dev:$VERSION .
+    - docker push $CI_REGISTRY_IMAGE/dev:$VERSION
+    - docker push $CI_REGISTRY_IMAGE/dev:latest
+  only:
+    - develop
+
+build_staging:
+  stage: build
+  script:
+    - echo "CkZST00gbm9kZToxMi4xNi4yLXN0cmV0Y2gKCldPUktESVIgL2FwcApDT1BZIHBhY2thZ2UuanNvbiB5YXJuLmxvY2sgLi8KUlVOIHlhcm4KQ09QWSAuLyAuCgoKUlVOIGlmIFsgLWYgLmVudi5kZXYgXTsgdGhlbiBjcCAtZiAuZW52LmRldiAuZW52LmxvY2FsOyBmaQoKClJVTiB5YXJuIGJ1aWxkCkNNRCBbInlhcm4iLCAic3RhcnQiXQo=" | base64 -d > Dockerfile
+    - VERSION=$(git_describe)
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $CI_REGISTRY_IMAGE/staging:latest || true
+    - docker build --cache-from $CI_REGISTRY_IMAGE/staging:latest --tag $CI_REGISTRY_IMAGE/staging:latest --tag $CI_REGISTRY_IMAGE/staging:$VERSION .
+    - docker push $CI_REGISTRY_IMAGE/staging:$VERSION
+    - docker push $CI_REGISTRY_IMAGE/staging:latest
+  only:
+    - staging
+
+
+
+
+
+
+deploy_dev:
+  stage: deploy
+  image: lfdominguez/curl-git
+  cache: {}
+  script:
+    - deploy_to_kubernetes_dev
+  only:
+    - develop
+  dependencies:
+    - build_dev
